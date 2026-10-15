@@ -1,0 +1,241 @@
+
+%% 36. 牛顿-欧拉动力学建模
+
+% 三连杆参数
+L = [0.4; 0.3; 0.2];
+mass = [2.0; 1.5; 1.0];
+
+n = 3;
+
+% 当前关节角度
+q_dyn = deg2rad([30; -40; 50]);
+
+% 重力加速度向量（空间系表达）
+gravity = [0; -9.81; 0];
+
+%% 37. 构造零位相邻连杆变换 Mlist
+%
+% Mlist(:,:,1) = M_01
+% Mlist(:,:,2) = M_12
+% Mlist(:,:,3) = M_23
+% Mlist(:,:,4) = M_34
+
+Mlist = repmat(eye(4),1,1,n+1);
+
+Mlist(1,4,1) = L(1)/2;
+
+Mlist(1,4,2) = (L(1)+L(2))/2;
+
+Mlist(1,4,3) = (L(2)+L(3))/2;
+
+Mlist(1,4,4) = L(3)/2;
+
+%% 38. 构造空间关节旋量 S_i
+%
+% Si = [wi; -wi x ri]
+
+rAxis = [
+    0, L(1), L(1)+L(2);
+    0, 0,    0;
+    0, 0,    0
+];
+
+Slist_dyn = zeros(6,n);
+
+for i = 1:n
+
+    wi = [0; 0; 1];
+    ri = rAxis(:,i);
+
+    vi = -cross(wi,ri);
+
+    Slist_dyn(:,i) = [wi;vi];
+
+end
+
+%% 39. 计算各连杆坐标系中的关节旋量 Ai
+%
+% Ai = Ad_(M_0i^-1) * Si
+
+Alist = zeros(6,n);
+
+M0i = eye(4);
+
+for i = 1:n
+
+    % 累乘得到零位空间系到连杆i的位姿
+    M0i = M0i * Mlist(:,:,i);
+
+    R0i = M0i(1:3,1:3);
+    p0i = M0i(1:3,4);
+
+    % 刚体变换的逆
+    M0i_inv = [
+        R0i', -R0i'*p0i;
+        zeros(1,3), 1
+    ];
+
+    % 伴随变换
+    AdM_inv = adjointSE3(M0i_inv);
+
+    Ai = AdM_inv * Slist_dyn(:,i);
+
+    Alist(:,i) = Ai;
+
+    % 使用关节轴几何定义独立验证Ai
+    wi_local = R0i'*Slist_dyn(1:3,i);
+    ri_local = R0i'*(rAxis(:,i)-p0i);
+
+    Ai_geom = [
+        wi_local;
+        -cross(wi_local,ri_local)
+    ];
+
+    fprintf('关节%d Ai验证误差 = %.3e\n', ...
+        i,norm(Ai-Ai_geom));
+
+end
+
+disp('各连杆坐标系中的关节旋量 Alist =');
+disp(Alist);
+
+%% 40. 构造空间惯量矩阵 Gi
+%
+% 坐标系原点位于质心
+%
+% Gi = [Ici,   0;
+%         0, mi*eye(3)]
+
+Glist = zeros(6,6,n);
+
+for i = 1:n
+
+    mi = mass(i);
+    li = L(i);
+
+    % 均匀细杆质心惯量
+    Ixx = 0;
+    Iyy = mi*li^2/12;
+    Izz = mi*li^2/12;
+
+    Ici = diag([Ixx,Iyy,Izz]);
+
+    Gi = [
+        Ici, zeros(3,3);
+        zeros(3,3), mi*eye(3)
+    ];
+
+    Glist(:,:,i) = Gi;
+
+end
+
+disp('第二连杆空间惯量矩阵 G2 =');
+disp(Glist(:,:,2));
+
+%% 41. 验证零位变换的累乘
+
+Mhome = eye(4);
+
+for i = 1:n+1
+    Mhome = Mhome*Mlist(:,:,i);
+end
+
+disp('零位末端位姿 Mhome =');
+disp(Mhome);
+
+% 应位于 x = 0.9 m
+assert(norm(Mhome(1:3,4)-[sum(L);0;0])<1e-12);
+
+%% 42. 利用相邻连杆变换重新计算正运动学
+%
+% T_(i-1,i)(qi) = M_(i-1,i)*exp([Ai]*qi)
+%
+% T_04 = T_01*T_12*T_23*M_34
+
+T_links = eye(4);
+
+for i = 1:n
+
+    Mi = Mlist(:,:,i);
+
+    Ai_hat = twistHat(Alist(:,i));
+
+    Ti = Mi*expm(Ai_hat*q_dyn(i));
+
+    T_links = T_links*Ti;
+
+end
+
+T_links = T_links*Mlist(:,:,n+1);
+
+%% 43. 使用空间POE独立验证
+
+T_poe = eye(4);
+
+for i = 1:n
+
+    Si_hat = twistHat(Slist_dyn(:,i));
+
+    T_poe = T_poe*expm(Si_hat*q_dyn(i));
+
+end
+
+T_poe = T_poe*Mhome;
+
+disp('相邻连杆变换得到的末端位姿:');
+disp(T_links);
+
+disp('空间POE得到的末端位姿:');
+disp(T_poe);
+
+err_T = norm(T_links-T_poe,'fro');
+
+fprintf('两种运动学建模结果误差 = %.3e\n',err_T);
+
+assert(err_T<1e-10);
+
+%% 44. 为后续牛顿-欧拉递推准备伴随矩阵
+%
+% T_(i,i-1) =
+%     exp(-[Ai]*qi) * inv(M_(i-1,i))
+%
+% 即从坐标系i-1到坐标系i的表达变换
+
+AdTi = zeros(6,6,n+1);
+
+for i = 1:n
+
+    Mi = Mlist(:,:,i);
+
+    Ri = Mi(1:3,1:3);
+    pi = Mi(1:3,4);
+
+    Mi_inv = [
+        Ri', -Ri'*pi;
+        zeros(1,3), 1
+    ];
+
+    Ai_hat = twistHat(Alist(:,i));
+
+    Ti_im1 = expm(-Ai_hat*q_dyn(i))*Mi_inv;
+
+    AdTi(:,:,i) = adjointSE3(Ti_im1);
+
+end
+
+% 末端工具坐标系到第三连杆坐标系的
+% 力递推也需要对应的伴随矩阵
+
+M34 = Mlist(:,:,n+1);
+
+R34 = M34(1:3,1:3);
+p34 = M34(1:3,4);
+
+M34_inv = [
+    R34', -R34'*p34;
+    zeros(1,3), 1
+];
+
+AdTi(:,:,n+1) = adjointSE3(M34_inv);
+
+disp('牛顿-欧拉动力学模型初始化完成');
