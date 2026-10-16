@@ -1,0 +1,292 @@
+
+%% 50. 从牛顿-欧拉逆动力学构造 M, c, g
+
+q_test = deg2rad([30; -40; 50]);
+dq_test = [0.2; -0.1; 0.3];
+ddq_test = [0.5; -0.2; 0.1];
+
+n = length(q_test);
+
+zero_q = zeros(n,1);
+zero_g = zeros(3,1);
+
+%% 1. 重力项
+g_NE = inverseDynamicsNE( ...
+    q_test,zero_q,zero_q,gravity, ...
+    Mlist,Alist,Glist);
+
+%% 2. 速度二次项
+c_NE = inverseDynamicsNE( ...
+    q_test,dq_test,zero_q,zero_g, ...
+    Mlist,Alist,Glist);
+
+%% 3. 质量矩阵
+M_NE = zeros(n,n);
+
+for j = 1:n
+
+    % 第j个单位关节加速度
+    ej = zeros(n,1);
+    ej(j) = 1;
+
+    % 得到质量矩阵第j列
+    M_NE(:,j) = inverseDynamicsNE( ...
+        q_test,zero_q,ej,zero_g, ...
+        Mlist,Alist,Glist);
+
+end
+
+disp('质量矩阵 M(q):');
+disp(M_NE);
+
+disp('速度二次项 c(q,dq):');
+disp(c_NE);
+
+disp('重力项 g(q):');
+disp(g_NE);
+
+%% 4. 检查完整动力学分解
+
+tau_direct = inverseDynamicsNE( ...
+    q_test,dq_test,ddq_test,gravity, ...
+    Mlist,Alist,Glist);
+
+tau_decomp = M_NE*ddq_test + c_NE + g_NE;
+
+fprintf('逆动力学分解误差: %.3e\n', ...
+    norm(tau_direct-tau_decomp));
+
+assert(norm(tau_direct-tau_decomp)<1e-10);
+
+%% 5. 检查质量矩阵性质
+
+err_sym = norm(M_NE-M_NE','fro');
+
+lambda_M = eig(M_NE);
+
+fprintf('质量矩阵对称误差: %.3e\n',err_sym);
+
+disp('质量矩阵特征值:');
+disp(lambda_M);
+
+assert(err_sym<1e-10);
+assert(all(lambda_M>0));
+
+%% 6. 检查速度二次项性质
+
+c_negative = inverseDynamicsNE( ...
+    q_test,-dq_test,zero_q,zero_g, ...
+    Mlist,Alist,Glist);
+
+c_double = inverseDynamicsNE( ...
+    q_test,2*dq_test,zero_q,zero_g, ...
+    Mlist,Alist,Glist);
+
+fprintf('速度反向检验误差: %.3e\n', ...
+    norm(c_negative-c_NE));
+
+fprintf('速度放大两倍检验误差: %.3e\n', ...
+    norm(c_double-4*c_NE));
+
+
+%% 51. 利用质心动能和势能交叉验证
+
+gmag = 9.81;
+
+[M_COM,g_COM,U_COM] = comEnergyTerms3R( ...
+    q_test,L,mass,gmag);
+
+disp('RNEA得到的质量矩阵:');
+disp(M_NE);
+
+
+
+disp('质心动能得到的质量矩阵:');
+disp(M_COM);
+
+fprintf('质量矩阵交叉验证误差: %.3e\n', ...
+    norm(M_NE-M_COM,'fro'));
+
+fprintf('重力项交叉验证误差: %.3e\n', ...
+    norm(g_NE-g_COM));
+
+assert(norm(M_NE-M_COM,'fro')<1e-10);
+assert(norm(g_NE-g_COM)<1e-10);
+
+
+
+
+function [Mq,gq,U] = comEnergyTerms3R(q,L,mass,gmag)
+
+    n = length(q);
+
+    % 连杆累计转角
+    alpha = cumsum(q);
+
+    % 当前关节位置和质心位置
+    pJoint = zeros(2,n);
+    pCOM = zeros(2,n);
+
+    for i = 2:n
+
+        pJoint(:,i) = pJoint(:,i-1) ...
+            + L(i-1)*[
+                cos(alpha(i-1));
+                sin(alpha(i-1))
+            ];
+
+    end
+
+    for i = 1:n
+
+        pCOM(:,i) = pJoint(:,i) ...
+            + L(i)/2*[
+                cos(alpha(i));
+                sin(alpha(i))
+            ];
+
+    end
+
+    Mq = zeros(n,n);
+    gq = zeros(n,1);
+
+    for i = 1:n
+
+        %% 质心线速度雅可比
+        Jvi = zeros(2,n);
+
+        for j = 1:i
+
+            r = pCOM(:,i)-pJoint(:,j);
+
+            % z轴转动产生的质心线速度
+            Jvi(:,j) = [-r(2);r(1)];
+
+        end
+
+        %% 角速度雅可比
+        Jwi = zeros(1,n);
+        Jwi(1:i) = 1;
+
+        %% 绕质心z轴的转动惯量
+        Izi = mass(i)*L(i)^2/12;
+
+        %% 动能对应的质量矩阵
+        Mq = Mq ...
+            + mass(i)*(Jvi'*Jvi) ...
+            + Izi*(Jwi'*Jwi);
+
+        %% 势能对应的重力项
+        gq = gq + mass(i)*gmag*Jvi(2,:)';
+
+    end
+
+    %% 总势能
+    U = gmag*sum(mass'.*pCOM(2,:));
+
+end
+
+
+%% 52. 独立验证速度二次项
+
+eps_fd = 1e-6;
+n = length(q_test);
+
+% dM_dq(:,:,k) = dM/dq_k
+dM_dq = zeros(n,n,n);
+
+for k = 1:n
+
+    q_plus = q_test;
+    q_minus = q_test;
+
+    q_plus(k) = q_plus(k)+eps_fd;
+    q_minus(k) = q_minus(k)-eps_fd;
+
+    M_plus = comEnergyTerms3R( ...
+        q_plus,L,mass,gmag);
+
+    M_minus = comEnergyTerms3R( ...
+        q_minus,L,mass,gmag);
+
+    dM_dq(:,:,k) = ...
+        (M_plus-M_minus)/(2*eps_fd);
+
+end
+
+% Christoffel符号构造速度二次项
+c_COM = zeros(n,1);
+
+for i = 1:n
+    for j = 1:n
+        for k = 1:n
+
+            Gamma_ijk = 0.5*( ...
+                dM_dq(i,j,k) ...
+              + dM_dq(i,k,j) ...
+              - dM_dq(j,k,i));
+
+            c_COM(i) = c_COM(i) ...
+                + Gamma_ijk*dq_test(j)*dq_test(k);
+
+        end
+    end
+end
+
+%% 53. 正向动力学验证
+
+q_test = deg2rad([30;-40;50]);
+dq_zero = zeros(3,1);
+
+% 求静止保持力矩
+tau_hold = inverseDynamicsNE( ...
+    q_test,dq_zero,dq_zero,gravity, ...
+    Mlist,Alist,Glist);
+
+% 用保持力矩计算正向动力学
+ddq_hold = forwardDynamicsNE( ...
+    q_test,dq_zero,tau_hold,gravity, ...
+    Mlist,Alist,Glist);
+
+disp('施加重力补偿后的关节加速度:');
+disp(ddq_hold);
+
+assert(norm(ddq_hold)<1e-10);
+
+
+
+
+%% 54. 无驱动力矩下的重力加速度
+
+tau_free = zeros(3,1);
+
+ddq_free = forwardDynamicsNE( ...
+    q_test,dq_zero,tau_free,gravity, ...
+    Mlist,Alist,Glist);
+
+disp('重力作用下的关节角加速度:');
+disp(ddq_free);
+
+% 用逆动力学进行回代检查
+tau_recovered = inverseDynamicsNE( ...
+    q_test,dq_zero,ddq_free,gravity, ...
+    Mlist,Alist,Glist);
+
+fprintf('正向/逆向动力学回代误差: %.3e\n', ...
+    norm(tau_recovered-tau_free));
+
+assert(norm(tau_recovered-tau_free)<1e-10);
+
+disp('RNEA速度二次项:');
+disp(c_NE);
+
+disp('Christoffel方法速度二次项:');
+disp(c_COM);
+
+fprintf('速度二次项交叉验证误差: %.3e\n', ...
+    norm(c_NE-c_COM));
+
+assert(norm(c_NE-c_COM)<1e-7);
+
+
+
