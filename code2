@@ -1,0 +1,151 @@
+
+%% 45. 牛顿-欧拉正向递推
+%
+% Vi = Ad(T_i,i-1)*V_i-1 + Ai*dqi
+%
+% dVi = Ad(T_i,i-1)*dV_i-1
+%     + ad(Vi)*(Ai*dqi)
+%     + Ai*ddqi
+
+% 使用第36-44节构造好的模型：
+% Mlist, Alist, Glist, AdTi, gravity
+%
+% 注意：如果修改q_dyn，
+% 必须重新计算第44节中的AdTi
+
+dq_dyn  = [ 0.2; -0.1; 0.3];
+ddq_dyn = [ 0.5; -0.2; 0.1];
+
+n = 3;
+
+% 第1列存储基座{0}
+% 第i+1列存储连杆{i}
+V_all  = zeros(6,n+1);
+dV_all = zeros(6,n+1);
+
+%% 基座初始化
+
+V_all(:,1) = zeros(6,1);
+
+% 通过基座加速度引入重力
+dV_all(:,1) = [zeros(3,1); -gravity];
+
+%% 正向递推
+
+for i = 1:n
+
+    % 上一连杆速度、加速度
+    V_prev  = V_all(:,i);
+    dV_prev = dV_all(:,i);
+
+    % 从上一连杆坐标系转换到当前连杆坐标系
+    AdT = AdTi(:,:,i);
+
+    % 当前关节旋量
+    Ai = Alist(:,i);
+
+    % 当前关节产生的相对速度
+    V_rel = Ai*dq_dyn(i);
+
+    %% 速度递推
+    Vi = AdT*V_prev + V_rel;
+
+    %% 加速度递推
+
+    % 上一连杆加速度的贡献
+    dVi_parent = AdT*dV_prev;
+
+    % 速度耦合项
+    dVi_cross = adSE3(Vi)*V_rel;
+
+    % 当前关节加速度贡献
+    dVi_joint = Ai*ddq_dyn(i);
+
+    dVi = dVi_parent + dVi_cross + dVi_joint;
+
+    %% 保存
+    V_all(:,i+1) = Vi;
+    dV_all(:,i+1) = dVi;
+
+    fprintf('\n===== 连杆 %d =====\n',i);
+
+    disp('速度旋量 Vi =');
+    disp(Vi);
+
+    disp('加速度递推量 dVi =');
+    disp(dVi);
+
+    fprintf('耦合项范数 = %.6e\n', ...
+        norm(dVi_cross));
+
+end
+
+
+
+%% 46. 不考虑重力时的加速度递推
+
+dV_motion = zeros(6,n+1);
+
+% 固定基座，且不引入重力
+dV_motion(:,1) = zeros(6,1);
+
+for i = 1:n
+
+    Ai = Alist(:,i);
+    Vi = V_all(:,i+1);
+    AdT = AdTi(:,:,i);
+
+    dV_motion(:,i+1) = ...
+        AdT*dV_motion(:,i) ...
+        + adSE3(Vi)*(Ai*dq_dyn(i)) ...
+        + Ai*ddq_dyn(i);
+
+end
+
+%% 比较含重力与不含重力的结果
+
+alpha = cumsum(q_dyn);
+
+for i = 1:n
+
+    % 当前连杆相对于空间系的旋转矩阵
+    a = alpha(i);
+
+    Ri = [
+        cos(a), -sin(a), 0;
+        sin(a),  cos(a), 0;
+        0,       0,      1
+    ];
+
+    % 重力在当前连杆系中的补偿项
+    gravity_effect = [
+        zeros(3,1);
+        -Ri'*gravity
+    ];
+
+    % 两次加速度递推的差
+    delta_dV = ...
+        dV_all(:,i+1)-dV_motion(:,i+1);
+
+    fprintf('连杆%d 重力贡献误差 = %.3e\n', ...
+        i,norm(delta_dV-gravity_effect));
+
+end
+
+  
+%% 辅助函数：李代数ad算子
+
+function adV = adSE3(V)
+
+    w = V(1:3);
+    v = V(4:6);
+
+    % ad_V = [ [w],  0;
+    %          [v], [w] ]
+
+    adV = [
+        skew3(w), zeros(3,3);
+        skew3(v), skew3(w)
+    ];
+
+end
