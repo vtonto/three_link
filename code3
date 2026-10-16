@@ -1,0 +1,236 @@
+
+%% 47. 牛顿-欧拉反向递推
+%
+% Fi = Gi*dVi
+%    - ad(Vi)'*Gi*Vi
+%    + Ad(T_i+1,i)'*Fi+1
+%
+% tau_i = Ai'*Fi
+
+n = 3;
+
+tau_NE = zeros(n,1);
+
+% 存储每根连杆坐标系中表达的空间力
+F_link = zeros(6,n);
+
+% 末端没有外部载荷
+F_next = zeros(6,1);
+
+for i = n:-1:1
+
+    % 第i根连杆的速度和有效加速度
+    Vi = V_all(:,i+1);
+    dVi = dV_all(:,i+1);
+
+    % 第i根连杆的空间惯量
+    Gi = Glist(:,:,i);
+
+    % 当前关节旋量
+    Ai = Alist(:,i);
+
+    %% 1. 惯性项
+    F_inertia = Gi*dVi;
+
+    %% 2. 空间动量的速度耦合项
+    Hi = Gi*Vi;
+
+    F_velocity = -adSE3(Vi)'*Hi;
+
+    %% 3. 下游连杆传递来的空间力
+    AdT_child = AdTi(:,:,i+1);
+
+    F_child = AdT_child'*F_next;
+
+    %% 4. 当前连杆需要传递的总空间力
+    Fi = F_inertia + F_velocity + F_child;
+
+    %% 5. 投影到关节运动方向
+    tau_NE(i) = Ai'*Fi;
+
+    %% 6. 保存结果，准备上一根连杆
+    F_link(:,i) = Fi;
+    F_next = Fi;
+
+    fprintf('\n===== 连杆%d =====\n',i);
+
+    disp('惯性项 Gi*dVi:');
+    disp(F_inertia);
+
+    disp('速度耦合项:');
+    disp(F_velocity);
+
+    disp('下游传递的空间力:');
+    disp(F_child);
+
+    disp('总空间力 Fi:');
+    disp(Fi);
+
+    fprintf('关节力矩 tau_%d = %.8f Nm\n', ...
+        i,tau_NE(i));
+
+end
+
+disp('牛顿-欧拉逆动力学力矩:');
+disp(tau_NE);
+
+
+%% 48. 验证静止重力补偿
+
+q_test = zeros(3,1);
+dq_test = zeros(3,1);
+ddq_test = zeros(3,1);
+
+[tau_static,~,~,F_static] = ...
+    inverseDynamicsNE( ...
+        q_test,dq_test,ddq_test,gravity, ...
+        Mlist,Alist,Glist);
+
+disp('静止重力补偿力矩:');
+disp(tau_static);
+
+tau_expected = [
+    19.86525;
+    6.13125;
+    0.98100
+];
+
+fprintf('重力补偿误差 = %.3e\n', ...
+    norm(tau_static-tau_expected));
+
+assert(norm(tau_static-tau_expected)<1e-9);
+
+disp('各连杆空间力（每列对应一根连杆）:');
+disp(F_static);
+
+
+%% 49. 验证一般运动状态
+
+q_test = deg2rad([30;-40;50]);
+dq_test = [0.2;-0.1;0.3];
+ddq_test = [0.5;-0.2;0.1];
+
+tau_test = inverseDynamicsNE( ...
+    q_test,dq_test,ddq_test,gravity, ...
+    Mlist,Alist,Glist);
+
+tau_expected = [
+    18.185972103;
+    5.974389645;
+    0.782811826
+];
+
+fprintf('一般运动状态力矩误差 = %.3e\n', ...
+    norm(tau_test-tau_expected));
+
+assert(norm(tau_test-tau_expected)<1e-6);
+
+
+
+function [tau,V_all,dV_all,F_link] = ...
+    inverseDynamicsNE(q,dq,ddq,gravity, ...
+                      Mlist,Alist,Glist)
+
+    n = length(q);
+
+    %% 1. 计算当前相邻坐标系的伴随矩阵
+    AdTi = zeros(6,6,n+1);
+
+    for i = 1:n+1
+
+        if i <= n
+
+            % 当前相邻连杆位姿
+            Trel = Mlist(:,:,i) ...
+                * expm(twistHat(Alist(:,i))*q(i));
+
+        else
+
+            % 第三连杆质心到末端的固定变换
+            Trel = Mlist(:,:,i);
+
+        end
+
+        % 刚体变换求逆
+        R = Trel(1:3,1:3);
+        p = Trel(1:3,4);
+
+        Tinv = [
+            R', -R'*p;
+            zeros(1,3), 1
+        ];
+
+        AdTi(:,:,i) = adjointSE3(Tinv);
+
+    end
+
+    %% 2. 初始化
+    V_all = zeros(6,n+1);
+    dV_all = zeros(6,n+1);
+
+    % 基座速度为零
+    V_all(:,1) = zeros(6,1);
+
+    % 通过基座加速度引入重力
+    dV_all(:,1) = [zeros(3,1);-gravity];
+
+    %% 3. 正向递推
+    for i = 1:n
+
+        Ai = Alist(:,i);
+        AdT = AdTi(:,:,i);
+
+        % 当前关节的相对运动
+        Vrel = Ai*dq(i);
+
+        % 速度
+        Vi = AdT*V_all(:,i) + Vrel;
+
+        % 有效加速度
+        dVi = AdT*dV_all(:,i) ...
+            + adSE3(Vi)*Vrel ...
+            + Ai*ddq(i);
+
+        V_all(:,i+1) = Vi;
+        dV_all(:,i+1) = dVi;
+
+    end
+
+    %% 4. 反向递推
+    tau = zeros(n,1);
+    F_link = zeros(6,n);
+
+    % 没有末端外部载荷
+    F_next = zeros(6,1);
+
+    for i = n:-1:1
+
+        Vi = V_all(:,i+1);
+        dVi = dV_all(:,i+1);
+
+        Gi = Glist(:,:,i);
+        Ai = Alist(:,i);
+
+        % 连杆自身的动力学空间力
+        F_self = Gi*dVi ...
+            - adSE3(Vi)'*(Gi*Vi);
+
+        % 下游空间力
+        F_child = AdTi(:,:,i+1)'*F_next;
+
+        % 总空间力
+        Fi = F_self + F_child;
+
+        % 关节力矩
+        tau(i) = Ai'*Fi;
+
+        % 保存
+        F_link(:,i) = Fi;
+
+        % 传递给上一根连杆
+        F_next = Fi;
+
+    end
+
+end
+
